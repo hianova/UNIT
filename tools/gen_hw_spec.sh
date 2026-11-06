@@ -19,7 +19,24 @@ elif [ "$UNAME_S" = "Linux" ]; then
     [ -n "$PAGE_BYTES" ]       || PAGE_BYTES="$(getconf PAGESIZE 2>/dev/null || true)"
     [ -n "$CACHE_LINE_BYTES" ] || CACHE_LINE_BYTES="$(getconf LEVEL1_DCACHE_LINESIZE 2>/dev/null || true)"
     [ -n "$L1D_BYTES" ]        || L1D_BYTES="$(getconf LEVEL1_DCACHE_SIZE 2>/dev/null || true)"
+else
+    case "$UNAME_S" in
+        FreeBSD|OpenBSD|NetBSD|DragonFly)
+            [ -n "$PAGE_BYTES" ] || PAGE_BYTES="$(sysctl -n hw.pagesize 2>/dev/null || getconf PAGESIZE 2>/dev/null || echo 4096)"
+            [ -n "$CACHE_LINE_BYTES" ] || CACHE_LINE_BYTES=64
+            [ -n "$L1D_BYTES" ]        || L1D_BYTES=32768
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            [ -n "$PAGE_BYTES" ]       || PAGE_BYTES="$(getconf PAGESIZE 2>/dev/null || echo 4096)"
+            [ -n "$CACHE_LINE_BYTES" ] || CACHE_LINE_BYTES=64
+            [ -n "$L1D_BYTES" ]        || L1D_BYTES=32768
+            ;;
+    esac
 fi
+
+case "$PAGE_BYTES" in ''|*[!0-9]*|0) PAGE_BYTES=4096 ;; esac
+case "$CACHE_LINE_BYTES" in ''|*[!0-9]*|0) CACHE_LINE_BYTES=64 ;; esac
+case "$L1D_BYTES" in ''|*[!0-9]*|0) L1D_BYTES=32768 ;; esac
 
 if [ -z "$VECTOR_BYTES" ]; then
     case "$UNAME_M" in

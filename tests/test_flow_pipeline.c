@@ -130,6 +130,13 @@ int main(int argc, char **argv) {
                               (uint16_t)(UNIT_SIEVE_ALL_SOUND & 0xFFFFULL), 0U);
         eval_cell.packet.body_slice = 0ULL;
 
+        /* Warm up 1 pass to pre-fault code/rodata pages before rusage measurement */
+        (void)flow_clock_monotonic_ns();
+        (void)flow_hardware_cycles();
+        (void)unit_flow_exec_cell(eng, inline_u_cell);
+        (void)unit_flow_exec_cell(eng, eval_cell);
+        eng->executed_cells = 0ULL;
+
         struct rusage ru_before, ru_after;
         getrusage(RUSAGE_SELF, &ru_before);
         uint64_t t0_ns = flow_clock_monotonic_ns();

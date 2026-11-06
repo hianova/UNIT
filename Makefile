@@ -48,7 +48,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(HW_SPEC_H): tools/gen_hw_spec.sh | $(BUILD_DIR)
-	@CC="$(CC)" ./tools/gen_hw_spec.sh > $@
+	@CC="$(CC)" ./tools/gen_hw_spec.sh > $@.tmp && mv $@.tmp $@ || { rm -f $@.tmp $@; exit 1; }
 
 $(BUILD_DIR)/obj/unit_core.o: src/unit_core.c $(wildcard src/*.h) $(HW_SPEC_H) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/obj

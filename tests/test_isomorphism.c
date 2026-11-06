@@ -12,6 +12,11 @@ int main(void) {
         UNIT_ASSERT_EQ(sizeof(UnitCpuInstView), 16U);
         UNIT_ASSERT_EQ(sizeof(UnitCell128), 16U);
 
+        typedef struct __attribute__((aligned(64))) {
+            uint64_t words[8];
+        } DummyState64;
+        FLOW_STATIC_ASSERT_UNIVALENT(DummyState64, UnitUtf8ControlWave64);
+
         uint64_t ctrl = unit_control_pack(
             (uint8_t)UNIT_OP_LOAD_U_EXT, (uint8_t)UNIT_BIT_CLASS_7B_ASCII,
             (uint8_t)UNIT_CURRENT_L1_ARENA, 2U, (uint16_t)(UNIT_SIEVE_ALL_SOUND & 0xFFFFULL), 56U);

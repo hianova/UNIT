@@ -34,9 +34,9 @@ extern "C" {
 
 #define UNIT_VERSION_MAJOR 1
 #define UNIT_VERSION_MINOR 0
-#define UNIT_VERSION_PATCH 0
+#define UNIT_VERSION_PATCH 1
 #ifndef UNIT_VERSION_STRING
-#define UNIT_VERSION_STRING "1.0.0"
+#define UNIT_VERSION_STRING "1.0.1"
 #endif
 
 #define UNIT_WAVE_BYTES 64U
@@ -66,7 +66,7 @@ typedef enum {
  * Captures the complete structural prefix topology of up to 64 UTF-8 bytes in
  * 64-bit register masks so the data plane stores ONLY raw payload bits.
  */
-typedef struct {
+typedef struct __attribute__((aligned(UNIT_WAVE_BYTES))) {
     uint64_t ascii_mask;     /* bit i = 1 iff byte i is 0xxxxxxx (7 payload bits) */
     uint64_t cont_mask;      /* bit i = 1 iff byte i is 10xxxxxx (6 payload bits) */
     uint64_t lead2_mask;     /* bit i = 1 iff byte i is 110xxxxx (5 payload bits) */
@@ -82,8 +82,8 @@ typedef struct {
     uint16_t _pad;
 } UnitUtf8ControlWave64;
 
-_Static_assert(sizeof(UnitUtf8ControlWave64) == 64U,
-               "UnitUtf8ControlWave64 must fit in a single 64-byte cache line");
+_Static_assert(sizeof(UnitUtf8ControlWave64) == 64U && _Alignof(UnitUtf8ControlWave64) == 64U,
+               "UnitUtf8ControlWave64 must be 64-byte size and 64-byte aligned");
 
 /*
  * Compact Minimal-Bit Packet Block (Control Signal + Stripped Minimal-Bit Payload):
@@ -91,7 +91,7 @@ _Static_assert(sizeof(UnitUtf8ControlWave64) == 64U,
  * up to 448 bits for 64 ASCII chars, 256 bits for 64 BCD digits, 128 bits for 64 ternary
  * lanes, or 512 bits for 64 lossless raw passthrough bytes).
  */
-typedef struct {
+typedef struct __attribute__((aligned(FLOW_HW_CACHE_LINE_BYTES))) {
     UnitUtf8ControlWave64 control;
     uint64_t bits[8]; /* 512 bits (64 bytes) holds up to 64 lossless raw or stripped bytes */
 } UnitUtf8MinBitWave64;
@@ -233,11 +233,12 @@ static inline uint32_t unit_swar_parse_8digits_u64(uint64_t ascii_digits) {
 
 /*
  * Branchless Single-Pass 8-Byte Wire Token -> Signed Q48.16 Fixed-Point Extractor:
- * Accepts ANY 8-byte ASCII numeric token with optional leading '+'/'-' and optional
- * decimal point '.' at any byte position (e.g. "00000042", "64.50000", "+0042.25",
- * "-1.23456"). Executes in O(1) SWAR register algebra without loops, updating
- * `*inout_sieve` if any byte is malformed, with 0-ULP exact agreement with
- * `unit_utf8_parse_q16` via Granlund-Montgomery Q63 ceil reciprocals.
+ * Accepts ANY 8-byte ASCII numeric token with optional leading/trailing space-padding
+ * (' '), optional leading '+'/'-', and optional decimal point '.' at any byte position
+ * (e.g. "00000042", "   32.50", "32.50   ", " -32.50 ", "+0042.25", "-1.23456").
+ * Executes in O(1) SWAR register algebra without loops, updating `*inout_sieve` if any
+ * byte is malformed, with 0-ULP exact agreement with `unit_utf8_parse_q16` via
+ * Granlund-Montgomery Q64 ceil reciprocals.
  */
 static inline int64_t unit_swar_wire8_to_q16_branchless(uint64_t word8, uint64_t *inout_sieve) {
     /*
@@ -261,9 +262,46 @@ static inline int64_t unit_swar_wire8_to_q16_branchless(uint64_t word8, uint64_t
     uint8_t b0 = (uint8_t)(word8 & 0xFFU);
     uint64_t has_sign = (uint64_t)((b0 == '+') | (b0 == '-'));
     uint64_t is_neg = (uint64_t)(b0 == '-');
-
-    /* Replace leading sign at byte 0 with '0' (0x30) if present */
     uint64_t clean_w = has_sign ? ((word8 & ~UINT64_C(0xFF)) | UINT64_C(0x30)) : word8;
+    uint64_t has_digits_ok = 1ULL;
+
+    if (__builtin_expect((b0 == 0x20U) || ((word8 >> 56U) == 0x20ULL), 0)) {
+        uint8_t raw_dmask = unit_swar_digit_mask8(word8);
+        has_digits_ok = (uint64_t)(raw_dmask != 0U);
+
+        /* Borrow-free SWAR detection of ASCII space ' ' (0x20) across all 8 bytes */
+        uint64_t xor_spc = word8 ^ UINT64_C(0x2020202020202020);
+        uint64_t spc_low7 =
+            ((xor_spc & UINT64_C(0x7F7F7F7F7F7F7F7F)) + UINT64_C(0x7F7F7F7F7F7F7F7F));
+        uint64_t spc_high = ~(xor_spc | spc_low7) & UNIT_SWAR_HIGHS_U64;
+        uint8_t spc_mask = unit_swar_movemask8(spc_high);
+
+        /* Right-align trailing spaces into leading spaces (in little-endian: shift left) */
+        uint8_t non_spc = (uint8_t)(~spc_mask);
+        uint32_t trail_spc =
+            (non_spc != 0U) ? ((uint32_t)__builtin_clz((uint32_t)non_spc) - 24U) : 0U;
+        uint32_t trail_shift = trail_spc << 3U;
+        uint64_t trail_fill =
+            (trail_shift == 0U) ? 0ULL : (UINT64_C(0x2020202020202020) >> (64U - trail_shift));
+        uint64_t raligned_w = (word8 << trail_shift) | trail_fill;
+        uint8_t spc_mask_r = (uint8_t)((spc_mask << trail_spc) | ((1U << trail_spc) - 1U));
+
+        /* Locate first non-space byte (0..7) and inspect optional '+'/'-' sign */
+        uint32_t first_non_spc = (uint32_t)__builtin_ctz((uint32_t)(~spc_mask_r) | 0x100U);
+        uint32_t sign_shift = (first_non_spc & 7U) << 3U;
+        uint8_t b_first = (uint8_t)((raligned_w >> sign_shift) & 0xFFU);
+        has_sign = (uint64_t)((first_non_spc < 8U) & ((b_first == '+') | (b_first == '-')));
+        is_neg = (uint64_t)((first_non_spc < 8U) & (b_first == '-'));
+
+        /* Replace sign at first_non_spc with '0' and convert leading ' ' (0x20) -> '0' (0x30) */
+        uint64_t sign_replaced_w =
+            has_sign
+                ? ((raligned_w & ~(UINT64_C(0xFF) << sign_shift)) | (UINT64_C(0x30) << sign_shift))
+                : raligned_w;
+        uint64_t lead_bit_mask =
+            (first_non_spc < 8U) ? ((1ULL << sign_shift) - 1ULL) : ~UINT64_C(0);
+        clean_w = sign_replaced_w | (UINT64_C(0x1010101010101010) & lead_bit_mask);
+    }
 
     /* SWAR parallel detection of '.' (0x2E) across all 8 bytes */
     uint64_t xor_dot = clean_w ^ UINT64_C(0x2E2E2E2E2E2E2E2E);
@@ -284,7 +322,7 @@ static inline int64_t unit_swar_wire8_to_q16_branchless(uint64_t word8, uint64_t
     uint64_t dig_w = has_one_dot ? spliced_w : clean_w;
 
     uint8_t dmask = unit_swar_digit_mask8(dig_w);
-    uint64_t valid = (uint64_t)((dmask == 0xFFU) && (multi_dot == 0ULL));
+    uint64_t valid = (uint64_t)(has_digits_ok && (dmask == 0xFFU) && (multi_dot == 0ULL));
     if (inout_sieve) {
         uint64_t clear_bits = valid ? 0ULL
                                     : (UNIT_SIEVE_DECIMAL_VALID | UNIT_SIEVE_UTF8_WELL_FORMED |

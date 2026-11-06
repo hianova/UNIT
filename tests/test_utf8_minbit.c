@@ -262,7 +262,9 @@ int main(void) {
 
         /* D7: Cache-line compactness & 64-byte (512-bit) lossless raw byte passthrough */
         UNIT_ASSERT_EQ(sizeof(UnitUtf8ControlWave64), 64U);
+        UNIT_ASSERT_EQ(_Alignof(UnitUtf8ControlWave64), 64U);
         UNIT_ASSERT_EQ(sizeof(UnitUtf8MinBitWave64), 128U);
+        UNIT_ASSERT_EQ(_Alignof(UnitUtf8MinBitWave64), FLOW_HW_CACHE_LINE_BYTES);
         uint8_t raw64[UNIT_WAVE_BYTES];
         for (size_t i = 0U; i < UNIT_WAVE_BYTES; ++i) {
             raw64[i] = (uint8_t)(0x80U | (uint8_t)i); /* Invalid UTF-8 across all 64 bytes */
@@ -281,11 +283,13 @@ int main(void) {
         UNIT_ASSERT_EQ(sieve_dec_raw & UNIT_SIEVE_UTF8_WELL_FORMED, 0ULL);
 
         /* D8: 0-ULP exact match between unit_swar_wire8_to_q16_branchless and unit_utf8_parse_q16
+         * (including leading/trailing space-padding)
          */
-        const char *ulp_cases[] = {"00000042", "+1234567", "-1234567", "123456.7", "12345.67",
-                                   "1234.567", "123.4567", "12.34567", "1.234567", ".1234567",
-                                   "+.125000", "-.375000", "0.000625", "12.00000", "99.99999",
-                                   "-0.00001", "+0.33333", "-7.77777"};
+        const char *ulp_cases[] = {
+            "00000042", "+1234567", "-1234567", "123456.7", "12345.67", "1234.567", "123.4567",
+            "12.34567", "1.234567", ".1234567", "+.125000", "-.375000", "0.000625", "12.00000",
+            "99.99999", "-0.00001", "+0.33333", "-7.77777", "   32.50", "32.50   ", "  -32.50",
+            " -32.50 ", "   +42.5", "   42   ", "  -.125 ", "   0.125"};
         for (size_t i = 0U; i < sizeof(ulp_cases) / sizeof(ulp_cases[0]); ++i) {
             uint64_t w8 = 0ULL;
             memcpy(&w8, ulp_cases[i], 8U);
@@ -297,6 +301,18 @@ int main(void) {
             UNIT_ASSERT_EQ(s_swar, UNIT_SIEVE_ALL_SOUND);
             UNIT_ASSERT_EQ(s_parse, UNIT_SIEVE_ALL_SOUND);
             UNIT_ASSERT_EQ(q_swar, (int64_t)q_parse.value);
+        }
+
+        /* Malformed space/sign/dot tokens must clear UNIT_SIEVE_DECIMAL_VALID */
+        const char *bad_space_cases[] = {"        ", "   -    ", "   +    ", "   .    ",
+                                         "   -.   ", "-  32.50", "32. 50  ", "32 .50  "};
+        for (size_t i = 0U; i < sizeof(bad_space_cases) / sizeof(bad_space_cases[0]); ++i) {
+            uint64_t w8 = 0ULL;
+            memcpy(&w8, bad_space_cases[i], 8U);
+            uint64_t s_bad = UNIT_SIEVE_ALL_SOUND;
+            int64_t q_bad = unit_swar_wire8_to_q16_branchless(w8, &s_bad);
+            UNIT_ASSERT_EQ(q_bad, 0LL);
+            UNIT_ASSERT_EQ(s_bad & UNIT_SIEVE_DECIMAL_VALID, 0ULL);
         }
 
         /* D10: 1.58-Bit Balanced Ternary Wave64 Codec */
