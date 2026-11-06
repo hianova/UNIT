@@ -293,16 +293,18 @@ typedef enum {
     UNIT_GUARD_SIEVE_REJECT = 3      /* Hardware/protocol/canonical sieve rejected  */
 } UnitGuardVerdict;
 
-typedef struct {
-    UnitGuardVerdict verdict;
+typedef struct __attribute__((aligned(FLOW_HW_CACHE_LINE_BYTES))) {
     int64_t ternary_score_q16;  /* <weights, activations> * scale_q16 via POPCNT  */
     int64_t min_slack_q16;      /* Minimum Q48.16 slack across active hyperplanes */
     int64_t t_hit_q16;          /* Predicted 2-Jet boundary impact time in Q48.16 */
     uint64_t violated_mask;     /* Active hyperplane violation mask               */
     uint64_t next_cubical_mask; /* Resulting cubical state mask after Kan routing */
     uint64_t sieve;             /* Combined hardware + protocol sieve             */
+    uint64_t reserved_abi64;    /* Explicit 8B pad for 64-byte cache-line univalence */
+    UnitGuardVerdict verdict;   /* 4B guard verdict                               */
     uint8_t focus_plane;        /* Tightest, violated, or first-hit hyperplane    */
     uint8_t kan_routed;         /* 1 iff cubical neighbor transition was taken    */
+    uint16_t reserved_flags;    /* Explicit 2B alignment completion (0 holes)     */
 } UnitGuardReport;
 
 /*

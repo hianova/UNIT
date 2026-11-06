@@ -738,6 +738,197 @@ static int64_t unit_extract_cell_q16(UnitFlowEngine *eng, UnitCpuInstView inst,
     return (int64_t)r.value;
 }
 
+typedef void (*UnitOpHandlerFn)(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                UnitExecOutcome *out, uint64_t *local_sieve);
+
+static void unit_op_handle_nop(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                               UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)eng;
+    (void)inst;
+    (void)axis;
+    (void)local_sieve;
+    out->current_drive = (uint8_t)UNIT_CURRENT_ZERO_IDLE;
+}
+
+static void unit_op_handle_utf8_minbit(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                       UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)axis;
+    uint64_t slot =
+        unit_resolve_arena_index(inst.operand_pointer, UNIT_ARENA_CAP_MASK, local_sieve);
+    const UnitUtf8MinBitWave64 *w = &eng->wave_arena[slot];
+    if (!w->control.is_valid_utf8) {
+        *local_sieve &= ~UNIT_SIEVE_UTF8_WELL_FORMED;
+    }
+    out->primary_value_q16 = (int64_t)w->control.min_bit_len;
+}
+
+static void unit_op_handle_load_u_ext(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                      UnitExecOutcome *out, uint64_t *local_sieve) {
+    int64_t val_q16 = unit_extract_cell_q16(eng, inst, local_sieve);
+    uint32_t dim = (uint32_t)axis & (UNIT_STATE_DIM - 1U);
+    out->focus_plane_or_dim = dim;
+    if ((*local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
+        int32_t prev_u = eng->u_ext[dim];
+        int32_t prev_du = eng->du_ext[dim];
+        int32_t next_u = unit_clamp_i32_sieve(val_q16, local_sieve);
+        FlowResultU64 du_res =
+            flow_asm_qsub_i64((int64_t)next_u, (int64_t)prev_u, local_sieve);
+        int32_t next_du = unit_clamp_i32_sieve((int64_t)du_res.value, local_sieve);
+        FlowResultU64 ddu_res =
+            flow_asm_qsub_i64((int64_t)next_du, (int64_t)prev_du, local_sieve);
+        int32_t next_ddu = unit_clamp_i32_sieve((int64_t)ddu_res.value, local_sieve);
+        eng->u_ext[dim] = next_u;
+        eng->du_ext[dim] = next_du;
+        eng->ddu_ext[dim] = next_ddu;
+        out->primary_value_q16 = (int64_t)next_u;
+    } else {
+        out->primary_value_q16 = (int64_t)eng->u_ext[dim];
+    }
+}
+
+static void unit_op_handle_load_b_ext(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                      UnitExecOutcome *out, uint64_t *local_sieve) {
+    int64_t bound_q16 = unit_extract_cell_q16(eng, inst, local_sieve);
+    uint32_t plane = (uint32_t)axis & 15U;
+    out->focus_plane_or_dim = plane;
+    if ((*local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
+        atomic_store_explicit(&eng->qpoly.b[plane], bound_q16, memory_order_relaxed);
+        atomic_store_explicit(&eng->qpoly.b_exit[plane], bound_q16, memory_order_relaxed);
+        atomic_fetch_or_explicit(&eng->qpoly.active_mask, (1ULL << plane),
+                                 memory_order_release);
+        out->primary_value_q16 = bound_q16;
+    } else {
+        out->primary_value_q16 =
+            atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
+    }
+}
+
+static void unit_op_handle_set_hysteresis(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                          UnitExecOutcome *out, uint64_t *local_sieve) {
+    uint32_t plane = (uint32_t)axis & 15U;
+    int64_t b_enter = atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
+    int64_t b_exit = unit_extract_cell_q16(eng, inst, local_sieve);
+    out->focus_plane_or_dim = plane;
+    if ((*local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
+        UnitFlowPoly4D_set_hysteresis(&eng->qpoly, plane, b_enter, b_exit);
+        out->primary_value_q16 = b_exit;
+    } else {
+        out->primary_value_q16 =
+            atomic_load_explicit(&eng->qpoly.b_exit[plane], memory_order_relaxed);
+    }
+}
+
+static void unit_op_handle_eval_qpoly(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                      UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)inst;
+    (void)axis;
+    uint64_t active = atomic_load_explicit(&eng->qpoly.active_mask, memory_order_acquire) &
+                      UnitFlowPoly4D_valid_plane_mask();
+    uint64_t rem = active;
+    while (rem != 0ULL) {
+        uint32_t i = (uint32_t)__builtin_ctzll(rem);
+        rem &= (rem - 1ULL);
+        (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->u_ext, UNIT_STATE_DIM, local_sieve);
+    }
+    FlowQPolyEval ev =
+        UnitFlowPoly4D_eval_hysteresis(&eng->qpoly, eng->u_ext, eng->prev_violated_mask);
+    eng->prev_violated_mask = ev.violated_mask;
+    out->violated_mask = ev.violated_mask;
+    if (ev.violated_mask != 0ULL) {
+        *local_sieve &= ~FLOW_ASM_SIEVE_QPOLY_INTERIOR;
+        out->primary_value_q16 = -ev.worst_violation;
+        out->focus_plane_or_dim = ev.worst_plane;
+    } else {
+        out->primary_value_q16 = ev.min_slack;
+        out->focus_plane_or_dim = ev.tightest_plane;
+    }
+}
+
+static void unit_op_handle_predict_jet2(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                        UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)inst;
+    (void)axis;
+    uint64_t active = atomic_load_explicit(&eng->qpoly.active_mask, memory_order_acquire) &
+                      UnitFlowPoly4D_valid_plane_mask();
+    uint64_t use_exit_mask =
+        eng->prev_violated_mask
+            ? (eng->prev_violated_mask &
+               atomic_load_explicit(&eng->qpoly.hysteresis_mask, memory_order_relaxed))
+            : 0ULL;
+    int64_t b_snap[16];
+    for (uint32_t i = 0U; i < 16U; ++i) {
+        int64_t b_enter_i = atomic_load_explicit(&eng->qpoly.b[i], memory_order_relaxed);
+        int64_t b_exit_i = atomic_load_explicit(&eng->qpoly.b_exit[i], memory_order_relaxed);
+        b_snap[i] = flow_asm_select_i64((use_exit_mask >> i) & 1ULL, b_exit_i, b_enter_i);
+    }
+    uint64_t rem = active;
+    while (rem != 0ULL) {
+        uint32_t i = (uint32_t)__builtin_ctzll(rem);
+        rem &= (rem - 1ULL);
+        (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->u_ext, UNIT_STATE_DIM, local_sieve);
+        (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->du_ext, UNIT_STATE_DIM, local_sieve);
+        (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->ddu_ext, UNIT_STATE_DIM, local_sieve);
+    }
+    FlowQPolyForecast fc =
+        flow_qpoly_predict_next_face(&eng->qpoly.A[0][0], b_snap, active, UNIT_STATE_DIM,
+                                     eng->u_ext, eng->du_ext, eng->ddu_ext);
+    out->will_exit_poly = fc.will_exit ? 1U : 0U;
+    out->focus_plane_or_dim = fc.plane;
+    out->primary_value_q16 = fc.t_hit_q;
+}
+
+static void unit_op_handle_cubical_step(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                        UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)inst;
+    uint64_t next_mask = 0ULL;
+    FlowKanStatus st = flow_cubical_step_neighbor(eng->cubical_state_mask, (uint32_t)axis,
+                                                  eng->boundary_filter_mask, &next_mask);
+    eng->cubical_state_mask = next_mask;
+    out->kan_homotopic = (st == FLOW_KAN_FILLED_HOMOTOPIC) ? 1U : 0U;
+    out->primary_value_q16 = (int64_t)next_mask;
+    if (st != FLOW_KAN_FILLED_HOMOTOPIC) {
+        *local_sieve &= ~FLOW_ASM_SIEVE_DOMAIN_VALID;
+    }
+}
+
+static void unit_op_handle_solvency_q16(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                        UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)inst;
+    (void)axis;
+    FlowResultU64 margin =
+        flow_asm_solvency_check_q16(eng->solvency_assets_q16, eng->solvency_liabilities_q16,
+                                    eng->solvency_buffer_q16, local_sieve);
+    out->primary_value_q16 = (int64_t)margin.value;
+}
+
+static void unit_op_handle_unmapped(UnitFlowEngine *eng, UnitCpuInstView inst, uint8_t axis,
+                                    UnitExecOutcome *out, uint64_t *local_sieve) {
+    (void)eng;
+    (void)inst;
+    (void)axis;
+    (void)out;
+    *local_sieve &= ~UNIT_SIEVE_PROTOCOL_SYNC;
+}
+
+static const UnitOpHandlerFn k_unit_op_lut[16] = {
+    unit_op_handle_nop,            /* 0x0: UNIT_OP_NOP            */
+    unit_op_handle_utf8_minbit,    /* 0x1: UNIT_OP_UTF8_MINBIT    */
+    unit_op_handle_load_u_ext,     /* 0x2: UNIT_OP_LOAD_U_EXT     */
+    unit_op_handle_load_b_ext,     /* 0x3: UNIT_OP_LOAD_B_EXT     */
+    unit_op_handle_set_hysteresis, /* 0x4: UNIT_OP_SET_HYSTERESIS */
+    unit_op_handle_eval_qpoly,     /* 0x5: UNIT_OP_EVAL_QPOLY     */
+    unit_op_handle_predict_jet2,   /* 0x6: UNIT_OP_PREDICT_JET2   */
+    unit_op_handle_cubical_step,   /* 0x7: UNIT_OP_CUBICAL_STEP   */
+    unit_op_handle_solvency_q16,   /* 0x8: UNIT_OP_SOLVENCY_Q16   */
+    unit_op_handle_unmapped,       /* 0x9 */
+    unit_op_handle_unmapped,       /* 0xA */
+    unit_op_handle_unmapped,       /* 0xB */
+    unit_op_handle_unmapped,       /* 0xC */
+    unit_op_handle_unmapped,       /* 0xD */
+    unit_op_handle_unmapped,       /* 0xE */
+    unit_op_handle_unmapped        /* 0xF */
+};
+
 UnitExecOutcome unit_flow_exec_cell(UnitFlowEngine *eng, UnitCell128 cell) {
     UnitExecOutcome out;
     memset(&out, 0, sizeof(out));
@@ -759,158 +950,8 @@ UnitExecOutcome unit_flow_exec_cell(UnitFlowEngine *eng, UnitCell128 cell) {
     out.current_drive = drive;
     out.focus_plane_or_dim = axis;
 
-    switch ((UnitUnifiedOpcode)op) {
-    case UNIT_OP_NOP:
-        out.current_drive = (uint8_t)UNIT_CURRENT_ZERO_IDLE;
-        break;
-
-    case UNIT_OP_UTF8_MINBIT: {
-        uint64_t slot =
-            unit_resolve_arena_index(inst.operand_pointer, UNIT_ARENA_CAP_MASK, &local_sieve);
-        const UnitUtf8MinBitWave64 *w = &eng->wave_arena[slot];
-        if (!w->control.is_valid_utf8) {
-            local_sieve &= ~UNIT_SIEVE_UTF8_WELL_FORMED;
-        }
-        out.primary_value_q16 = (int64_t)w->control.min_bit_len;
-        break;
-    }
-
-    case UNIT_OP_LOAD_U_EXT: {
-        int64_t val_q16 = unit_extract_cell_q16(eng, inst, &local_sieve);
-        uint32_t dim = (uint32_t)axis & (UNIT_STATE_DIM - 1U);
-        out.focus_plane_or_dim = dim;
-        if ((local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
-            int32_t prev_u = eng->u_ext[dim];
-            int32_t prev_du = eng->du_ext[dim];
-            int32_t next_u = unit_clamp_i32_sieve(val_q16, &local_sieve);
-            FlowResultU64 du_res =
-                flow_asm_qsub_i64((int64_t)next_u, (int64_t)prev_u, &local_sieve);
-            int32_t next_du = unit_clamp_i32_sieve((int64_t)du_res.value, &local_sieve);
-            FlowResultU64 ddu_res =
-                flow_asm_qsub_i64((int64_t)next_du, (int64_t)prev_du, &local_sieve);
-            int32_t next_ddu = unit_clamp_i32_sieve((int64_t)ddu_res.value, &local_sieve);
-            eng->u_ext[dim] = next_u;
-            eng->du_ext[dim] = next_du;
-            eng->ddu_ext[dim] = next_ddu;
-            out.primary_value_q16 = (int64_t)next_u;
-        } else {
-            out.primary_value_q16 = (int64_t)eng->u_ext[dim];
-        }
-        break;
-    }
-
-    case UNIT_OP_LOAD_B_EXT: {
-        int64_t bound_q16 = unit_extract_cell_q16(eng, inst, &local_sieve);
-        uint32_t plane = (uint32_t)axis & 15U;
-        out.focus_plane_or_dim = plane;
-        if ((local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
-            atomic_store_explicit(&eng->qpoly.b[plane], bound_q16, memory_order_relaxed);
-            atomic_store_explicit(&eng->qpoly.b_exit[plane], bound_q16, memory_order_relaxed);
-            atomic_fetch_or_explicit(&eng->qpoly.active_mask, (1ULL << plane),
-                                     memory_order_release);
-            out.primary_value_q16 = bound_q16;
-        } else {
-            out.primary_value_q16 =
-                atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
-        }
-        break;
-    }
-
-    case UNIT_OP_SET_HYSTERESIS: {
-        uint32_t plane = (uint32_t)axis & 15U;
-        int64_t b_enter = atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
-        int64_t b_exit = unit_extract_cell_q16(eng, inst, &local_sieve);
-        out.focus_plane_or_dim = plane;
-        if ((local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
-            UnitFlowPoly4D_set_hysteresis(&eng->qpoly, plane, b_enter, b_exit);
-            out.primary_value_q16 = b_exit;
-        } else {
-            out.primary_value_q16 =
-                atomic_load_explicit(&eng->qpoly.b_exit[plane], memory_order_relaxed);
-        }
-        break;
-    }
-
-    case UNIT_OP_EVAL_QPOLY: {
-        uint64_t active = atomic_load_explicit(&eng->qpoly.active_mask, memory_order_acquire) &
-                          UnitFlowPoly4D_valid_plane_mask();
-        uint64_t rem = active;
-        while (rem != 0ULL) {
-            uint32_t i = (uint32_t)__builtin_ctzll(rem);
-            rem &= (rem - 1ULL);
-            (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->u_ext, UNIT_STATE_DIM, &local_sieve);
-        }
-        FlowQPolyEval ev =
-            UnitFlowPoly4D_eval_hysteresis(&eng->qpoly, eng->u_ext, eng->prev_violated_mask);
-        eng->prev_violated_mask = ev.violated_mask;
-        out.violated_mask = ev.violated_mask;
-        if (ev.violated_mask != 0ULL) {
-            local_sieve &= ~FLOW_ASM_SIEVE_QPOLY_INTERIOR;
-            out.primary_value_q16 = -ev.worst_violation;
-            out.focus_plane_or_dim = ev.worst_plane;
-        } else {
-            out.primary_value_q16 = ev.min_slack;
-            out.focus_plane_or_dim = ev.tightest_plane;
-        }
-        break;
-    }
-
-    case UNIT_OP_PREDICT_JET2: {
-        uint64_t active = atomic_load_explicit(&eng->qpoly.active_mask, memory_order_acquire) &
-                          UnitFlowPoly4D_valid_plane_mask();
-        uint64_t use_exit_mask =
-            eng->prev_violated_mask
-                ? (eng->prev_violated_mask &
-                   atomic_load_explicit(&eng->qpoly.hysteresis_mask, memory_order_relaxed))
-                : 0ULL;
-        int64_t b_snap[16];
-        for (uint32_t i = 0U; i < 16U; ++i) {
-            int64_t b_enter_i = atomic_load_explicit(&eng->qpoly.b[i], memory_order_relaxed);
-            int64_t b_exit_i = atomic_load_explicit(&eng->qpoly.b_exit[i], memory_order_relaxed);
-            b_snap[i] = flow_asm_select_i64((use_exit_mask >> i) & 1ULL, b_exit_i, b_enter_i);
-        }
-        uint64_t rem = active;
-        while (rem != 0ULL) {
-            uint32_t i = (uint32_t)__builtin_ctzll(rem);
-            rem &= (rem - 1ULL);
-            (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->u_ext, UNIT_STATE_DIM, &local_sieve);
-            (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->du_ext, UNIT_STATE_DIM, &local_sieve);
-            (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->ddu_ext, UNIT_STATE_DIM, &local_sieve);
-        }
-        FlowQPolyForecast fc =
-            flow_qpoly_predict_next_face(&eng->qpoly.A[0][0], b_snap, active, UNIT_STATE_DIM,
-                                         eng->u_ext, eng->du_ext, eng->ddu_ext);
-        out.will_exit_poly = fc.will_exit ? 1U : 0U;
-        out.focus_plane_or_dim = fc.plane;
-        out.primary_value_q16 = fc.t_hit_q;
-        break;
-    }
-
-    case UNIT_OP_CUBICAL_STEP: {
-        uint64_t next_mask = 0ULL;
-        FlowKanStatus st = flow_cubical_step_neighbor(eng->cubical_state_mask, (uint32_t)axis,
-                                                      eng->boundary_filter_mask, &next_mask);
-        eng->cubical_state_mask = next_mask;
-        out.kan_homotopic = (st == FLOW_KAN_FILLED_HOMOTOPIC) ? 1U : 0U;
-        out.primary_value_q16 = (int64_t)next_mask;
-        if (st != FLOW_KAN_FILLED_HOMOTOPIC) {
-            local_sieve &= ~FLOW_ASM_SIEVE_DOMAIN_VALID;
-        }
-        break;
-    }
-
-    case UNIT_OP_SOLVENCY_Q16: {
-        FlowResultU64 margin =
-            flow_asm_solvency_check_q16(eng->solvency_assets_q16, eng->solvency_liabilities_q16,
-                                        eng->solvency_buffer_q16, &local_sieve);
-        out.primary_value_q16 = (int64_t)margin.value;
-        break;
-    }
-
-    default:
-        local_sieve &= ~UNIT_SIEVE_PROTOCOL_SYNC;
-        break;
-    }
+    /* 2. O(1) Zero-Switch LUT Dispatch */
+    k_unit_op_lut[op & 0x0FU](eng, inst, axis, &out, &local_sieve);
 
     eng->cumulative_sieve &= local_sieve;
     eng->executed_cells++;
