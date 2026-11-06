@@ -3,9 +3,10 @@ export PATH := /opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:/usr/local/bin:$(PAT
 CC ?= clang
 PREFIX ?= /usr/local
 FLOW_DIR ?= ../FLOW
+FLOW_LIB := $(FLOW_DIR)/build/libflow_rt.a
 UNIT_VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "1.0.0")
-CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic -Wmissing-prototypes -Werror -O2 -Isrc -Itests -I$(FLOW_DIR)/src
-override CFLAGS += -Isrc -Itests -I$(FLOW_DIR)/src -DUNIT_VERSION_STRING=\"$(UNIT_VERSION)\" -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
+CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic -Wmissing-prototypes -Werror -O2 -Isrc -Itests -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build
+override CFLAGS += -Isrc -Itests -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build -DUNIT_VERSION_STRING=\"$(UNIT_VERSION)\" -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
 
 LDLIBS ?=
 THREAD_FLAGS ?= -pthread
@@ -20,12 +21,9 @@ STACK_LDFLAGS ?=
 endif
 
 BUILD_DIR := build
-HW_SPEC_H := $(BUILD_DIR)/flow_hw_spec.h
 LIBUNIT_A := $(BUILD_DIR)/libunit.a
 
-override CFLAGS += -I$(BUILD_DIR)
-
-UNIT_OBJS := $(BUILD_DIR)/obj/unit_core.o $(BUILD_DIR)/obj/flow_core.o
+UNIT_OBJS := $(BUILD_DIR)/obj/unit_core.o
 
 AR ?= ar
 RANLIB ?= ranlib
@@ -47,14 +45,10 @@ fmt-check:
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(HW_SPEC_H): tools/gen_hw_spec.sh | $(BUILD_DIR)
-	@CC="$(CC)" ./tools/gen_hw_spec.sh > $@.tmp && mv $@.tmp $@ || { rm -f $@.tmp $@; exit 1; }
+$(FLOW_LIB):
+	$(MAKE) -C $(FLOW_DIR) all
 
-$(BUILD_DIR)/obj/unit_core.o: src/unit_core.c $(wildcard src/*.h) $(HW_SPEC_H) | $(BUILD_DIR)
-	@mkdir -p $(BUILD_DIR)/obj
-	$(CC) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
-
-$(BUILD_DIR)/obj/flow_core.o: $(FLOW_DIR)/src/flow_core.c $(wildcard $(FLOW_DIR)/src/*.h) $(HW_SPEC_H) | $(BUILD_DIR)
+$(BUILD_DIR)/obj/unit_core.o: src/unit_core.c $(wildcard src/*.h) $(FLOW_LIB) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/obj
 	$(CC) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
@@ -62,7 +56,7 @@ $(LIBUNIT_A): $(UNIT_OBJS)
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
-TEST_DEPS := tests/unit_test_kit.h $(LIBUNIT_A)
+TEST_DEPS := tests/unit_test_kit.h $(LIBUNIT_A) $(FLOW_LIB)
 
 TEST_BINARIES := \
 	$(BUILD_DIR)/test-utf8-minbit \
@@ -71,18 +65,21 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/bench-falsify
 
 $(BUILD_DIR)/test-utf8-minbit: tests/test_utf8_minbit.c $(TEST_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) $(FLOW_LIB) -o $@ $(LDLIBS)
 
 $(BUILD_DIR)/test-isomorphism: tests/test_isomorphism.c $(TEST_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) $(FLOW_LIB) -o $@ $(LDLIBS)
 
 $(BUILD_DIR)/test-flow-pipeline: tests/test_flow_pipeline.c $(TEST_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) $(FLOW_LIB) -o $@ $(LDLIBS)
 
 $(BUILD_DIR)/bench-falsify: tests/bench_falsify.c $(TEST_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) $(STACK_LDFLAGS) $(THREAD_FLAGS) $< $(LIBUNIT_A) $(FLOW_LIB) -o $@ $(LDLIBS)
 
 test: $(TEST_BINARIES)
+	@echo "=== [0/4] Pure Wire & Minimal-Bit Spec Headers Zero-FLOW-Dependency Audit ==="
+	@$(CC) -std=c17 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only src/unit_utf8_bit.h src/unit_isomorphism.h
+	@echo "  ✓ unit_utf8_bit.h & unit_isomorphism.h verified standalone (0 FLOW rt dependency)!"
 	@echo "=== [1/4] Observable UTF-8 <-> Minimal-Bit + Control Signal Substrate ==="
 	@$(BUILD_DIR)/test-utf8-minbit
 	@echo "=== [2/4] Protocol-Body <~> Opcode-Pointer Structural Isomorphism ==="

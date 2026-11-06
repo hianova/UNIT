@@ -33,6 +33,147 @@ extern "C" {
 #define UNIT_ARENA_CAP_MASK   (UNIT_ARENA_POW2_SLOTS - 1U)
 #define UNIT_STATE_DIM        4U
 
+_Static_assert(UNIT_HW_SIEVE_MEM_MASKED_INBOUNDS == FLOW_ASM_SIEVE_MEM_MASKED_INBOUNDS,
+               "UNIT_HW_SIEVE_MEM_MASKED_INBOUNDS must match FLOW_ASM_SIEVE_MEM_MASKED_INBOUNDS");
+_Static_assert(UNIT_HW_SIEVE_DOMAIN_VALID == FLOW_ASM_SIEVE_DOMAIN_VALID,
+               "UNIT_HW_SIEVE_DOMAIN_VALID must match FLOW_ASM_SIEVE_DOMAIN_VALID");
+_Static_assert(UNIT_HW_SIEVE_ALL_SOUND == FLOW_ASM_SIEVE_ALL_SOUND,
+               "UNIT_HW_SIEVE_ALL_SOUND must match FLOW_ASM_SIEVE_ALL_SOUND");
+
+/*
+ * Unified Non-Cancelling 64-Bit Hardware-Register 2-Jet Root Solver:
+ * Solves `s_i - r_i * t - 0.5 * c_i * t^2 = 0` (where v = s_i > 0, d1 = -r_i, d2 = -c_i)
+ * for the first exit time `t_q16` in (0, t_max_q16]:
+ *   - Keeps standard Q16 inputs in [2^12, 2^30) unshifted so `disc` executes the 1-div
+ *     `isqrt` fast path directly, while normalizing tiny or huge inputs into `[2^21, 2^22)`
+ *     for full precision and zero overflow.
+ *   - Uses branchless selection between Citardauq `t = 2*v / (|r_i| + sq)` when `r_i >= 0`
+ *     and `t = (|r_i| + sq) / c_i` when `r_i < 0`, guaranteeing zero catastrophic cancellation.
+ */
+static inline bool unit_jet2_solve_root_fast64(int64_t v, int64_t d1, int64_t d2, int64_t t_max_q16,
+                                               int64_t *out_t_q16) {
+    if (__builtin_expect(!out_t_q16 || v <= 0 || t_max_q16 <= 0, 0)) {
+        return false;
+    }
+    uint64_t mv = (uint64_t)v;
+    uint64_t mr = (d1 < 0) ? (0ULL - (uint64_t)d1) : (uint64_t)d1;
+    uint64_t mc = (d2 < 0) ? (0ULL - (uint64_t)d2) : (uint64_t)d2;
+    uint64_t or_m = mv | mr | mc;
+
+    int64_t r_i;
+    int64_t c_i;
+    if (__builtin_expect(or_m < (1ULL << 12U) || or_m >= (1ULL << 30U), 0)) {
+        if (d1 == INT64_MIN || d2 == INT64_MIN || flow_hott_is_boundary_tag((uint64_t)v) ||
+            flow_hott_is_boundary_tag((uint64_t)d1) || flow_hott_is_boundary_tag((uint64_t)d2)) {
+            return false;
+        }
+        r_i = -d1;
+        c_i = -d2;
+        if (r_i <= 0 && c_i <= 0) {
+            return false;
+        }
+        uint64_t max_m = (mv > mr) ? mv : mr;
+        if (mc > max_m) {
+            max_m = mc;
+        }
+        uint32_t lz = (uint32_t)__builtin_clzll(max_m);
+        if (lz < 42U) {
+            uint32_t shr = 42U - lz;
+            v >>= shr;
+            r_i >>= shr;
+            c_i >>= shr;
+        } else if (lz > 42U) {
+            uint32_t shl = lz - 42U;
+            v = (int64_t)((uint64_t)v << shl);
+            r_i = (int64_t)((uint64_t)r_i << shl);
+            c_i = (int64_t)((uint64_t)c_i << shl);
+        }
+        if (v <= 0 || (r_i <= 0 && c_i <= 0)) {
+            return false;
+        }
+        mr = (uint64_t)(r_i < 0 ? -r_i : r_i);
+        mc = (uint64_t)(c_i < 0 ? -c_i : c_i);
+    } else {
+        r_i = -d1;
+        c_i = -d2;
+        if (r_i <= 0 && c_i <= 0) {
+            return false;
+        }
+    }
+
+    if (c_i == 0) {
+        uint64_t t_u = (((uint64_t)v) << FLOW_Q16_SHIFT) / mr;
+        if (t_u > 0ULL && t_u <= (uint64_t)t_max_q16) {
+            *out_t_q16 = (int64_t)t_u;
+            return true;
+        }
+        return false;
+    }
+
+    /*
+     * Exact O(1) Horizon Reachability Sieve (Zero Division):
+     * When a tighter horizon `t_max_q16 < 2^30` is already known from an earlier plane:
+     *   - If c_i < 0 (concave), f(t) <= r_i * t - v, so r_i * t_max < v << 16 => unreachable.
+     *   - If c_i > 0 (convex with f(0) = -v < 0), unique positive root <= t_max iff f(t_max) >= 0.
+     */
+    if ((uint64_t)t_max_q16 < (1ULL << 30U)) {
+        __extension__ typedef __int128 i128;
+        i128 target = (i128)v << FLOW_Q16_SHIFT;
+        if (c_i < 0) {
+            if (r_i <= 0 || (i128)r_i * (i128)t_max_q16 < target) {
+                return false;
+            }
+        } else {
+            uint64_t t_ub = (uint64_t)t_max_q16 + 1ULL;
+            i128 f_ub = (i128)r_i * (i128)t_ub + (((i128)c_i * (i128)(t_ub * t_ub)) >> 17U);
+            if (f_ub < target) {
+                return false;
+            }
+        }
+    }
+
+    int64_t disc = r_i * r_i + 2LL * c_i * v;
+    if (disc < 0) {
+        return false;
+    }
+    uint64_t sq = unit_asm_isqrt_u64_fast((uint64_t)disc);
+    uint64_t q_sum = mr + sq;
+    uint64_t num =
+        (r_i >= 0) ? (((uint64_t)v) << (FLOW_Q16_SHIFT + 1U)) : (q_sum << FLOW_Q16_SHIFT);
+    uint64_t den = (r_i >= 0) ? q_sum : (uint64_t)c_i;
+    if (den == 0ULL) {
+        return false;
+    }
+    uint64_t t_u = num / den;
+    if (t_u > 0ULL && t_u <= (uint64_t)t_max_q16) {
+        *out_t_q16 = (int64_t)t_u;
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Encode a 64-lane 1.58-bit balanced ternary vector (`FlowBmfTernary64`, lanes in {-1, 0, +1})
+ * into a `UnitUtf8MinBitWave64` under `UNIT_BIT_CLASS_1B58_TERNARY`, verifying canonical
+ * encoding (`(sign_mask & ~nonzero_mask) == 0`) via `FLOW_ASM_SIEVE_DOMAIN_VALID`.
+ */
+int unit_ternary64_encode_minbit_wave64(FlowBmfTernary64 t, uint8_t lane_count,
+                                        UnitUtf8MinBitWave64 *out_wave, uint64_t *inout_sieve);
+
+/*
+ * Extract a `FlowBmfTernary64` balanced ternary vector from a `UnitUtf8MinBitWave64`
+ * encoded with `UNIT_BIT_CLASS_1B58_TERNARY`. Returns active lane count.
+ */
+size_t unit_ternary64_decode_minbit_wave64(const UnitUtf8MinBitWave64 *wave,
+                                           FlowBmfTernary64 *out_t, uint64_t *inout_sieve);
+
+/*
+ * Project an observable UTF-8 numeric token (integer or decimal fixed-point like
+ * "-123.456") directly into a `FLOW v4` Q48.16 integer (`FlowResultU64`) with
+ * hardware overflow and domain sieve tracking.
+ */
+FlowResultU64 unit_utf8_parse_q16(const uint8_t *utf8, size_t len, uint64_t *inout_sieve);
+
 /*
  * Define 4D External-Constraint Polyhedron and Lock-Free Cell SPSC Ring:
  * `u_ext` and `b` carry Q48.16 fixed-point values (`1.0 == FLOW_Q16_ONE`), while

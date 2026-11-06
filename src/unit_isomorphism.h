@@ -109,6 +109,12 @@ typedef struct {
     uint64_t operand_pointer; /* Z / 2^k Z masked memory index or immediate register operand */
 } UnitCpuInstView;
 
+#ifndef FLOW_STATIC_ASSERT_UNIVALENT
+#define FLOW_STATIC_ASSERT_UNIVALENT(TypeA, TypeB)                                       \
+    _Static_assert(sizeof(TypeA) == sizeof(TypeB) && _Alignof(TypeA) == _Alignof(TypeB), \
+                   "HoTT Univalence Violation: Types are not memory-layout isomorphic")
+#endif
+
 /* Zero-Runtime-Byte HoTT Univalence Proof: Packet View == Instruction View */
 FLOW_STATIC_ASSERT_UNIVALENT(UnitPacketView, UnitCpuInstView);
 
@@ -170,7 +176,7 @@ static inline uint64_t unit_resolve_arena_index(uint64_t raw_operand_ptr, uint64
     oob_bits = raw_operand_ptr & ~cap_mask;
 #endif
     if (oob_bits != 0ULL && inout_sieve) {
-        *inout_sieve &= ~FLOW_ASM_SIEVE_MEM_MASKED_INBOUNDS;
+        *inout_sieve &= ~UNIT_HW_SIEVE_MEM_MASKED_INBOUNDS;
     }
     return masked_idx;
 }
@@ -209,7 +215,7 @@ static inline UnitCell128 unit_make_inline_ternary32_cell(uint8_t opcode, uint8_
                                                           uint32_t nonzero_mask, uint32_t sign_mask,
                                                           uint64_t *inout_sieve) {
     if ((sign_mask & ~nonzero_mask) != 0U && inout_sieve) {
-        *inout_sieve &= ~(FLOW_ASM_SIEVE_DOMAIN_VALID | UNIT_SIEVE_UTF8_MINIMAL_LEN);
+        *inout_sieve &= ~(UNIT_HW_SIEVE_DOMAIN_VALID | UNIT_SIEVE_UTF8_MINIMAL_LEN);
     }
     uint32_t canon_sign = sign_mask & nonzero_mask;
     uint16_t sieve16 = (uint16_t)((inout_sieve ? *inout_sieve : UNIT_SIEVE_ALL_SOUND) & 0xFFFFULL);
