@@ -1,4 +1,4 @@
-# UNIT v1 — Unified Observable UTF-8 Minimal-Bit × Protocol-Opcode Isomorphic Substrate
+# UNIT (v1.1.0) — Unified Observable UTF-8 Minimal-Bit × Protocol-Opcode Isomorphic Substrate
 
 > **可觀測資料層統一規格（UTF-8 $\leftrightarrow$ 最小 Bit ＋ 控制訊號電流規格）$\times$ 封包與 CPU 指令完全同構（Protocol & Body $\cong$ Opcode & Pointer）$\times$ 底層直通 [`FLOW v4`](../FLOW) 全函數 ASM 核心。**
 
