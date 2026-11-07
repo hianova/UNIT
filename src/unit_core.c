@@ -771,11 +771,9 @@ static void unit_op_handle_load_u_ext(UnitFlowEngine *eng, UnitCpuInstView inst,
         int32_t prev_u = eng->u_ext[dim];
         int32_t prev_du = eng->du_ext[dim];
         int32_t next_u = unit_clamp_i32_sieve(val_q16, local_sieve);
-        FlowResultU64 du_res =
-            flow_asm_qsub_i64((int64_t)next_u, (int64_t)prev_u, local_sieve);
+        FlowResultU64 du_res = flow_asm_qsub_i64((int64_t)next_u, (int64_t)prev_u, local_sieve);
         int32_t next_du = unit_clamp_i32_sieve((int64_t)du_res.value, local_sieve);
-        FlowResultU64 ddu_res =
-            flow_asm_qsub_i64((int64_t)next_du, (int64_t)prev_du, local_sieve);
+        FlowResultU64 ddu_res = flow_asm_qsub_i64((int64_t)next_du, (int64_t)prev_du, local_sieve);
         int32_t next_ddu = unit_clamp_i32_sieve((int64_t)ddu_res.value, local_sieve);
         eng->u_ext[dim] = next_u;
         eng->du_ext[dim] = next_du;
@@ -794,12 +792,10 @@ static void unit_op_handle_load_b_ext(UnitFlowEngine *eng, UnitCpuInstView inst,
     if ((*local_sieve & UNIT_PARSE_SOUND_MASK) == UNIT_PARSE_SOUND_MASK) {
         atomic_store_explicit(&eng->qpoly.b[plane], bound_q16, memory_order_relaxed);
         atomic_store_explicit(&eng->qpoly.b_exit[plane], bound_q16, memory_order_relaxed);
-        atomic_fetch_or_explicit(&eng->qpoly.active_mask, (1ULL << plane),
-                                 memory_order_release);
+        atomic_fetch_or_explicit(&eng->qpoly.active_mask, (1ULL << plane), memory_order_release);
         out->primary_value_q16 = bound_q16;
     } else {
-        out->primary_value_q16 =
-            atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
+        out->primary_value_q16 = atomic_load_explicit(&eng->qpoly.b[plane], memory_order_relaxed);
     }
 }
 
@@ -869,9 +865,8 @@ static void unit_op_handle_predict_jet2(UnitFlowEngine *eng, UnitCpuInstView ins
         (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->du_ext, UNIT_STATE_DIM, local_sieve);
         (void)flow_asm_qdot_i32(eng->qpoly.A[i], eng->ddu_ext, UNIT_STATE_DIM, local_sieve);
     }
-    FlowQPolyForecast fc =
-        flow_qpoly_predict_next_face(&eng->qpoly.A[0][0], b_snap, active, UNIT_STATE_DIM,
-                                     eng->u_ext, eng->du_ext, eng->ddu_ext);
+    FlowQPolyForecast fc = flow_qpoly_predict_next_face(
+        &eng->qpoly.A[0][0], b_snap, active, UNIT_STATE_DIM, eng->u_ext, eng->du_ext, eng->ddu_ext);
     out->will_exit_poly = fc.will_exit ? 1U : 0U;
     out->focus_plane_or_dim = fc.plane;
     out->primary_value_q16 = fc.t_hit_q;

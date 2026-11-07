@@ -31,10 +31,10 @@ extern "C" {
  */
 
 #define UNIT_VERSION_MAJOR 1
-#define UNIT_VERSION_MINOR 1
+#define UNIT_VERSION_MINOR 2
 #define UNIT_VERSION_PATCH 0
 #ifndef UNIT_VERSION_STRING
-#define UNIT_VERSION_STRING "1.1.0"
+#define UNIT_VERSION_STRING "1.2.0"
 #endif
 
 #define UNIT_WAVE_BYTES 64U

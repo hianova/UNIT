@@ -1,11 +1,11 @@
-# UNIT (v1.1.0) — Unified Observable UTF-8 Minimal-Bit × Protocol-Opcode Isomorphic Substrate
+# UNIT — Unified Observable UTF-8 Minimal-Bit × Protocol-Opcode Isomorphic Substrate
 
-> **可觀測資料層統一規格（UTF-8 $\leftrightarrow$ 最小 Bit ＋ 控制訊號電流規格）$\times$ 封包與 CPU 指令完全同構（Protocol & Body $\cong$ Opcode & Pointer）$\times$ 底層直通 [`FLOW v4`](../FLOW) 全函數 ASM 核心。**
+> **可觀測資料層統一規格（UTF-8 $\leftrightarrow$ 最小 Bit ＋ 控制訊號電流規格）$\times$ 封包與 CPU 指令完全同構（Protocol & Body $\cong$ Opcode & Pointer）$\times$ 底層直通 [`FLOW`](../FLOW) 全函數 ASM 核心。**
 
 `UNIT` 實踐了計算機底層架構「資訊存儲（Data Layer）」與「控制訊號（Control Layer）」的同構收斂：
 1. **可觀測資料層（Observable Data Plane）**：外部世界與網路邊界以標準 **UTF-8** 進行觀測與通訊，無需外部社群更改協定。進入記憶體的第一刻，`UNIT` 透過無分支 64-bit SWAR 位元平行代數，將 UTF-8 內建的前綴控制位元（`0`, `10`, `110`, `1110`, `11110`）剝離為 **64-Byte L1 Cache 對齊之控制訊號波塊（[`UnitUtf8ControlWave64`](src/unit_utf8_bit.h)）**，資料平面僅存儲**最小位元載荷（[`UnitUtf8MinBitWave64`](src/unit_utf8_bit.h)：4-bit BCD、7-bit ASCII、1.58-bit 平衡三態 `FlowBmfTernary64`、或剝離前綴之 3..6-bit 緊湊位元流）**。
 2. **封包與指令結構同構（Structural Isomorphism）**：以封包視角是 **`[Protocol Header + Body Slice]`**（[`UnitPacketView`](src/unit_isomorphism.h)），以 CPU 視角則是 **`[Operator Opcode + Memory Pointer]`**（[`UnitCpuInstView`](src/unit_isomorphism.h)）。兩者在 16-Byte [`UnitCell128`](src/unit_isomorphism.h) 中通過編譯期 HoTT Univalence 同構證明（`FLOW_STATIC_ASSERT_UNIVALENT`），實現 **0 指令轉型**與 $\mathbb{Z}/2^k\mathbb{Z}$ 遮罩（ARM64 `and` + `bic`）零越界定址。
-3. **指令層由 `FLOW v4` 往下貫穿到底層**：統一單元 [`UnitCell128`](src/unit_isomorphism.h) 直接驅動 [`FLOW v4`](../FLOW/src) 的無分支 Q48.16 ASM 算術、多面體外部約束（`FlowQPoly` $A\mathbf{u}_{\text{ext}} \le \mathbf{b}_{\text{ext}}$ + Schmitt 雙閾值防抖遲滯）、2-Jet 二次世界線求根（[`unit_jet2_solve_root_fast64`](src/unit_flow_exec.h)）與 Cubical Kan 1-Cycle 鄰居步進。
+3. **指令層由 `FLOW` 往下貫穿到底層**：統一單元 [`UnitCell128`](src/unit_isomorphism.h) 直接驅動 [`FLOW`](../FLOW/src) 的無分支 Q48.16 ASM 算術、多面體外部約束（`FlowQPoly` $A\mathbf{u}_{\text{ext}} \le \mathbf{b}_{\text{ext}}$ + Schmitt 雙閾值防抖遲滯）、2-Jet 二次世界線求根（[`unit_jet2_solve_root_fast64`](src/unit_flow_exec.h)）與 Cubical Kan 1-Cycle 鄰居步進。
 4. **雙通用高階引擎（`unit_scan` ＋ `unit_guard`）**：
    - **`unit_scan`（資料層：最小位元列式與串流無解壓掃描）**：直接在 4-bit BCD 波塊與 16B `UnitCell128` 環形緩衝區上執行範圍過濾、56-bit 壓縮符號匹配與飽和累加，徹底免除解壓縮與 `memcmp` 記憶體牆成本。
    - **`unit_guard`（控制層：1.58-Bit 三態狀態機 ＋ 二階多面體安全護欄）**：以單指令 `POPCNT` 計算 64 通道 `{-1, 0, +1}` 平衡三態內積，融合 `FlowQPoly` 施密特遲滯與 2-Jet 穿隧時間預測，並在預計越界前自動觸發 1-Cycle 立方體 Kan 降維路由。
@@ -33,12 +33,12 @@
 │  • Word 1 : [ Z / 2^k Z Masked Arena Pointer  OR  56-Bit Inline Payload ]│
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      │
-       │  3. 通用高階雙引擎與 FLOW v4 總體 ASM 執行層 (src/unit_flow_exec.h)
+       │  3. 通用高階雙引擎與 FLOW 總體 ASM 執行層 (src/unit_flow_exec.h)
        ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ • Data Layer    : unit_scan_*  (無解壓 4b BCD 區間過濾 / 16B 56b 符號掃描)│
 │ • Control Layer : unit_guard_* (1.58b POPCNT 內積 + Schmitt + 2-Jet 護欄)│
-│ • FLOW v4 ASM   : adds/subs/smulh/extr + cset vs -> 16-bit Total Sieve   │
+│ • FLOW ASM      : adds/subs/smulh/extr + cset vs -> 16-bit Total Sieve   │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@
 | :--- | :--- | :--- |
 | **1. 純封包與最小位元規格層**<br>*(零 `FLOW (rt)` 依賴：僅依賴 `<stdint.h>` / `<stddef.h>` / `<stdbool.h>`)* | [`src/unit_utf8_bit.h`](src/unit_utf8_bit.h) | **SWAR UTF-8 控制訊號篩網與最小 Bit 編解碼規格**：防跨位元組進借位之 `unit_swar_digit_mask8`、`unit_swar_pack_7bit_u64`、`unit_swar_pack_4bit_bcd_u64`、`unit_swar_eval_bcd32`、Granlund-Montgomery Q64 倒數 0-ULP 單次提取器 `unit_swar_wire8_to_q16_branchless`、單次 `udiv` 切比雪夫分段線性精確平方根 `unit_asm_isqrt_u64_fast` 與無損 Wave64 編解碼 API |
 | **1. 純封包與最小位元規格層**<br>*(零 `FLOW (rt)` 依賴)* | [`src/unit_isomorphism.h`](src/unit_isomorphism.h) | **Protocol-Body $\cong$ Opcode-Pointer 同構定義**：64-bit 控制訊號與電流驅動規格 `unit_control_pack`、`UnitPacketView` $\simeq$ `UnitCpuInstView` Univalence 靜態證明、`unit_resolve_arena_index`（ARM64 `and` + `bic` 零 Segfault 遮罩指標）、內嵌 7-bit ASCII / 4-bit BCD / 1.58-bit Ternary 暫存器單元建構器與單次直通 `unit_wire8_single_pass_cell` |
-| **2. `FLOW` 執行橋接層**<br>*(需驅動 `UnitFlowEngine` 時才引入並連結 `../FLOW/build/libflow_rt.a`；`libunit.a` 僅含 `unit_core.o`)* | [`src/unit_flow_exec.h`](src/unit_flow_exec.h), [`src/unit_core.c`](src/unit_core.c) | **統一資料層直通 FLOW v4 執行引擎與算子橋接**：Citardauq 無消去二次求根器 `unit_jet2_solve_root_fast64`、1.58-bit 平衡三態 `FlowBmfTernary64` 橋接（`unit_ternary64_encode_minbit_wave64` / `unit_ternary64_decode_minbit_wave64`）、`unit_utf8_parse_q16`、`UnitFlowEngine`、`unit_ingest_utf8_packet`、`unit_flow_exec_cell`、`unit_flow_drain_ring`，以及通用掃描器 `unit_scan_*` 與通用護欄 `unit_guard_step_ternary_jet2` |
+| **2. `FLOW` 執行橋接層**<br>*(需驅動 `UnitFlowEngine` 時才引入並連結 `../FLOW/build/libflow_rt.a`；`libunit.a` 僅含 `unit_core.o`)* | [`src/unit_flow_exec.h`](src/unit_flow_exec.h), [`src/unit_core.c`](src/unit_core.c) | **統一資料層直通 FLOW 執行引擎與算子橋接**：Citardauq 無消去二次求根器 `unit_jet2_solve_root_fast64`、1.58-bit 平衡三態 `FlowBmfTernary64` 橋接（`unit_ternary64_encode_minbit_wave64` / `unit_ternary64_decode_minbit_wave64`）、`unit_utf8_parse_q16`、`UnitFlowEngine`、`unit_ingest_utf8_packet`、`unit_flow_exec_cell`、`unit_flow_drain_ring`，以及通用掃描器 `unit_scan_*` 與通用護欄 `unit_guard_step_ternary_jet2` |
 | **驗證與基準測試** | [`tests/test_utf8_minbit.c`](tests/test_utf8_minbit.c), [`tests/test_isomorphism.c`](tests/test_isomorphism.c), [`tests/test_flow_pipeline.c`](tests/test_flow_pipeline.c), [`tests/bench_falsify.c`](tests/bench_falsify.c) | **15,100+ 斷言之 IEEE 審計回歸與殘酷證偽基準套件（Falsification Suite）**：涵蓋純標頭零 `FLOW` 依賴靜態檢查、`D1`–`D10` 全數邊界回歸測試、SWAR 壓縮無損往返、RFC 3629 非法 UTF-8 攔截、直接最小 bit 計算（12x–13x 加速）、16B vs 128B 快取牆掃描（3x–4x 加速）、Wire-to-Decision 端到端吞吐量與 P50/P99.9 尾延遲壓制，以及 IEEE-754 尾數吞噬失效對照 |
 
 ---

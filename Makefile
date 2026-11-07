@@ -4,7 +4,7 @@ CC ?= clang
 PREFIX ?= /usr/local
 FLOW_DIR ?= ../FLOW
 FLOW_LIB := $(FLOW_DIR)/build/libflow_rt.a
-UNIT_VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "1.0.0")
+UNIT_VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "1.2.0")
 CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic -Wmissing-prototypes -Werror -O2 -Isrc -Itests -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build
 override CFLAGS += -Isrc -Itests -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build -DUNIT_VERSION_STRING=\"$(UNIT_VERSION)\" -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
 
